@@ -1,11 +1,11 @@
-// server.ts (pigpio使用版)
-
 import express from 'express';
 import http from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import axios from 'axios';
-// Gpioを'onoff'から'pigpio'に変更します
 import { Gpio } from 'pigpio';
+// ファイルパスを扱うためのモジュールを追加します。
+import path from 'path';
+import fs from 'fs';
 
 // --- 設定 ---
 const PORT = process.env.PORT || 8000;
@@ -19,7 +19,6 @@ interface SensorApiResponse { distance_cm: number; raw_data: RawData; fused_data
 let lastSensorData: SensorApiResponse | null = null;
 
 // --- GPIOピンの管理 ---
-// Gpioオブジェクトを永続的に保存するためのMap
 const activeGpios = new Map<number, Gpio>();
 
 // --- Express と Socket.IO のセットアップ ---
@@ -30,40 +29,53 @@ const io = new SocketIOServer(httpServer, {
     allowEIO3: true
 });
 
+// --- 拡張機能ファイルを配信するためのルート ---
+app.get('/sensor_extension.js', (req, res) => {
+    // --- ▼▼▼ ファイルパスの構築ロジックを修正 ▼▼▼ ---
+    // 実行中のディレクトリ(src)から一つ上の階層に上がり、
+    // `assets`フォルダの中の`sensor_extension.js`を指定します。
+    const filePath = path.join(__dirname, '..', 'assets', 'sensor_extension.js');
+    // --- ▲▲▲ ここまで修正 ▲▲▲ ---
+
+    fs.readFile(filePath, (err, data) => {
+        if (err) {
+            console.error(`[HTTP] Could not read sensor_extension.js:`, err);
+            res.status(404).send(`File not found at ${filePath}`);
+            return;
+        }
+        res.setHeader('Content-Type', 'application/javascript');
+        res.send(data);
+    });
+});
+
+
+// --- Socket.IOの接続ロジック ---
 io.on('connection', (socket) => {
     console.log(`[Socket.IO] Client connected: ${socket.id}`);
 
     socket.on('gpio_write', (data: { pin: number, value: 0 | 1 }) => {
         try {
             let pin: Gpio;
-
-            // 1. Mapに既にGPIOオブジェクトが存在するか確認
             if (activeGpios.has(data.pin)) {
-                // 2. 存在すれば、それを取り出す
                 pin = activeGpios.get(data.pin)!;
             } else {
-                // 3. 存在しなければ、新規作成してMapに保存する
-                //    `new Gpio`はBCM番号を正しく解釈します。
                 pin = new Gpio(data.pin, { mode: Gpio.OUTPUT });
                 activeGpios.set(data.pin, pin);
                 console.log(`[GPIO] Pin ${data.pin} initialized.`);
             }
-
-            // 4. 値を書き込む
             pin.digitalWrite(data.value);
             console.log(`[GPIO] Pin ${data.pin} set to ${data.value}`);
-
         } catch (e) {
             console.error(`[GPIO] Failed to write to pin ${data.pin}:`, e);
         }
     });
-
+    
     socket.on('disconnect', () => {
         console.log(`[Socket.IO] Client disconnected: ${socket.id}`);
     });
 });
 
-// --- センサーデータのポーリングと配信 (変更なし) ---
+// --- センサーデータのポーリングと配信 ---
 setInterval(async () => {
     try {
         const response = await axios.get<SensorApiResponse>(RUST_DEMON_URL);
@@ -80,12 +92,11 @@ setInterval(async () => {
 // --- サーバー起動 ---
 httpServer.listen(PORT, () => {
     console.log(`Application Gateway is running on http://localhost:${PORT}`);
+    console.log(`Scratch Extension URL: http://localhost:${PORT}/sensor_extension.js`);
 });
 
 // --- プロセス終了時のクリーンアップ ---
 process.on('SIGINT', () => {
     console.log('\n[Gateway] Cleaning up all active GPIOs...');
-    // `pigpio`では、明示的なunexportは不要です。
-    // プロセスが終了するとライブラリがクリーンアップします。
     process.exit(0);
 });
